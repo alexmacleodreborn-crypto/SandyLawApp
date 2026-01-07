@@ -136,7 +136,29 @@ if mode == "Manual":
     Z, Sigma, tau_rate, rp_prob, conf = sandy_core(
         confinement, entropy, tau_history, theta_rp
     )
+# -----------------------------------------------------
+# Square Play Controls
+# -----------------------------------------------------
 
+if mode == "Square":
+    st.sidebar.divider()
+    st.sidebar.subheader("▶️ Square Time Evolution")
+
+    c1, c2 = st.sidebar.columns(2)
+
+    if c1.button("▶️ Play" if not st.session_state.sq_play else "⏸ Pause"):
+        st.session_state.sq_play = not st.session_state.sq_play
+
+    if c2.button("⏮ Reset"):
+        st.session_state.sq_step = 0
+        st.session_state.sq_play = False
+
+    sq_speed_ms = st.sidebar.slider(
+        "Play speed (ms)",
+        100, 2000, 500, 100
+    )
+else:
+    sq_speed_ms = None
 # ---------------- CSV ----------------
 elif mode == "Paste CSV":
     st.subheader("Paste Time CSV")
