@@ -194,7 +194,7 @@ else:
     c3.metric("Square RP", "YES" if Amax >= 3 else "NO")
 
     st.write("τ̇ field")
-    st.dataframe(pd.DataFrame(tau_g).style.background_gradient("inferno"))
+    st.dataframe(pd.DataFrame(tau_g))
 
     st.write("Hot cells (1 = hot)")
     st.dataframe(pd.DataFrame(hot.astype(int)))
