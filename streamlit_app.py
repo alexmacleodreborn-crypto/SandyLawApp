@@ -2,7 +2,6 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
-import requests
 from io import StringIO
 import time
 
@@ -16,8 +15,12 @@ if "step" not in st.session_state:
     st.session_state.step = 0
 if "max_step" not in st.session_state:
     st.session_state.max_step = 0
+
+# Square state
 if "sq_step" not in st.session_state:
     st.session_state.sq_step = 0
+if "sq_play" not in st.session_state:
+    st.session_state.sq_play = False
 
 # =====================================================
 # SandyOS Core
@@ -43,10 +46,8 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     if len(tau_history) < 2:
         rp_prob = 0.0
     else:
-        if len(tau_history) >= 3:
-            slope = tau_rate - float(np.mean(tau_history[-3:]))
-        else:
-            slope = tau_rate - tau_history[-1]
+        base = np.mean(tau_history[-3:]) if len(tau_history) >= 3 else tau_history[-1]
+        slope = tau_rate - base
         rp_prob = 1 / (1 + math.exp(-15 * (slope - theta_rp)))
         rp_prob = clamp(rp_prob)
 
@@ -54,7 +55,7 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     return Z, Sigma, tau_rate, rp_prob, confidence
 
 # =====================================================
-# Volcano Square Engine (NEW)
+# Square Engine (5×5 Volcano Grid)
 # =====================================================
 
 def square_step(df, t, grid=5, bgZ=0.90, bgS=0.10):
@@ -111,12 +112,9 @@ history_len = st.sidebar.slider("History Length", 3, 50, 10)
 mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV", "Square"])
 
 # =====================================================
-# INPUT MODES
+# MANUAL MODE
 # =====================================================
 
-df = None
-
-# ---------------- MANUAL ----------------
 if mode == "Manual":
     st.subheader("Manual Input")
 
@@ -136,30 +134,11 @@ if mode == "Manual":
     Z, Sigma, tau_rate, rp_prob, conf = sandy_core(
         confinement, entropy, tau_history, theta_rp
     )
-# -----------------------------------------------------
-# Square Play Controls
-# -----------------------------------------------------
 
-if mode == "Square":
-    st.sidebar.divider()
-    st.sidebar.subheader("▶️ Square Time Evolution")
+# =====================================================
+# CSV MODE
+# =====================================================
 
-    c1, c2 = st.sidebar.columns(2)
-
-    if c1.button("▶️ Play" if not st.session_state.sq_play else "⏸ Pause"):
-        st.session_state.sq_play = not st.session_state.sq_play
-
-    if c2.button("⏮ Reset"):
-        st.session_state.sq_step = 0
-        st.session_state.sq_play = False
-
-    sq_speed_ms = st.sidebar.slider(
-        "Play speed (ms)",
-        100, 2000, 500, 100
-    )
-else:
-    sq_speed_ms = None
-# ---------------- CSV ----------------
 elif mode == "Paste CSV":
     st.subheader("Paste Time CSV")
 
@@ -187,7 +166,10 @@ elif mode == "Paste CSV":
         confinement, entropy, tau_history, theta_rp
     )
 
-# ---------------- SQUARE ----------------
+# =====================================================
+# SQUARE MODE (WITH PLAY)
+# =====================================================
+
 else:
     st.subheader("🟥 Volcano Square (5×5)")
 
@@ -201,6 +183,18 @@ else:
 
     sq_df = pd.read_csv(StringIO(sq_text))
     times = sorted(sq_df["time"].unique())
+
+    st.sidebar.divider()
+    st.sidebar.subheader("▶️ Square Time Evolution")
+
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("▶️ Play" if not st.session_state.sq_play else "⏸ Pause"):
+        st.session_state.sq_play = not st.session_state.sq_play
+    if c2.button("⏮ Reset"):
+        st.session_state.sq_step = 0
+        st.session_state.sq_play = False
+
+    sq_speed_ms = st.sidebar.slider("Play speed (ms)", 100, 2000, 500, 100)
 
     st.session_state.sq_step = min(st.session_state.sq_step, len(times)-1)
     t = times[st.session_state.sq_step]
@@ -221,12 +215,10 @@ else:
     st.write("Hot cells (1 = hot)")
     st.dataframe(pd.DataFrame(hot.astype(int)))
 
-    col1, col2 = st.columns(2)
-    if col1.button("▶ Next"):
+    # Auto-play
+    if st.session_state.sq_play and st.session_state.sq_step < len(times) - 1:
+        time.sleep(sq_speed_ms / 1000.0)
         st.session_state.sq_step += 1
-        st.rerun()
-    if col2.button("⏮ Reset"):
-        st.session_state.sq_step = 0
         st.rerun()
 
     st.stop()
