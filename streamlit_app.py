@@ -45,7 +45,40 @@ def sandy_scalar(conf, ent, hist, theta):
 
     return Z, S, tau, rp
 
-# ---------------- Square ----------------
+# =====================================================
+# STATE CLASSIFIERS (NEW)
+# =====================================================
+
+def classify_scalar_state(Z, tau, tau_hist, rp):
+    base = np.mean(tau_hist[-3:]) if len(tau_hist) >= 3 else (tau_hist[-1] if tau_hist else tau)
+    dtau = tau - base
+
+    if Z > 0.75 and tau < 0.08 and dtau < 0.02:
+        return -1, "−1 WELL (compressed / stabilised)"
+
+    if tau > 0.30 and dtau > 0.06 or rp > 0.85:
+        return 3, "+3 RELEASE (event)"
+
+    if dtau > 0.02 or rp > 0.55:
+        return 2, "+2 NO-RETURN (rupture forming)"
+
+    return 1, "+1 ENGINE (efficient contained output)"
+
+def classify_square_state(Amax, persist, persist_n):
+    if persist >= persist_n and Amax >= 3:
+        return 3, "+3 RELEASE (pathway sustained)"
+
+    if Amax >= 3 and persist > 0:
+        return 2, "+2 NO-RETURN (pathway forming)"
+
+    if Amax >= 1:
+        return 1, "+1 ENGINE (multi-site activity)"
+
+    return -1, "−1 WELL (stable field)"
+
+# =====================================================
+# SQUARE FUNCTIONS
+# =====================================================
 
 def square_tau(df, t, grid=5):
     Z = np.full((grid, grid), 0.9)
@@ -104,17 +137,7 @@ if mode == "Scalar CSV":
 
     st.subheader("Paste Scalar CSV")
 
-    csv_text = st.text_area(
-        "CSV",
-        height=220,
-        placeholder="""time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic
-t0,0.97,0.96,0.03,0.02
-t1,0.96,0.95,0.06,0.05
-t2,0.94,0.93,0.10,0.08
-t3,0.91,0.89,0.16,0.14
-t4,0.87,0.85,0.23,0.20"""
-    )
-
+    csv_text = st.text_area("CSV", height=220)
     if not csv_text.strip():
         st.stop()
 
@@ -142,8 +165,10 @@ t4,0.87,0.85,0.23,0.20"""
     ent = ent_cols.iloc[st.session_state.scalar_step]
 
     Z, S, tau, rp = sandy_scalar(conf, ent, tau_hist, theta)
+    state_code, state_label = classify_scalar_state(Z, tau, tau_hist, rp)
 
     st.subheader(f"Step {st.session_state.scalar_step+1}/{len(df)}")
+    st.markdown(f"### State: **{state_label}**")
 
     m1,m2,m3,m4 = st.columns(4)
     m1.metric("Z", f"{Z:.3f}")
@@ -173,22 +198,7 @@ else:
     speed = st.sidebar.slider("Play speed (ms)", 200, 2000, 600, 100)
 
     st.subheader("Paste Square CSV")
-
-    sq_text = st.text_area(
-        "CSV",
-        height=260,
-        placeholder="""time,i,j,confinement,entropy
-t0,3,3,0.95,0.05
-t1,3,3,0.92,0.08
-t1,3,4,0.93,0.07
-t2,3,3,0.90,0.12
-t2,3,4,0.90,0.11
-t2,4,3,0.91,0.10
-t3,3,3,0.88,0.18
-t3,3,4,0.87,0.17
-t3,4,3,0.86,0.16"""
-    )
-
+    sq_text = st.text_area("CSV", height=260)
     if not sq_text.strip():
         st.stop()
 
@@ -213,15 +223,18 @@ t3,4,3,0.86,0.16"""
     else:
         st.session_state.square_persist = 0
 
-    rp = st.session_state.square_persist >= persist_n
+    state_code, state_label = classify_square_state(
+        Amax, st.session_state.square_persist, persist_n
+    )
 
     st.subheader(f"Square time {t}")
+    st.markdown(f"### State: **{state_label}**")
 
     m1,m2,m3,m4 = st.columns(4)
     m1.metric("Max τ̇", f"{tau.max():.3f}")
     m2.metric("Hot Aₘₐₓ", Amax)
     m3.metric("Persistence", f"{st.session_state.square_persist}/{persist_n}")
-    m4.metric("Square RP", "YES" if rp else "NO")
+    m4.metric("Square RP", "YES" if state_code == 3 else "NO")
 
     st.dataframe(pd.DataFrame(tau))
     st.dataframe(pd.DataFrame(hot.astype(int)))
