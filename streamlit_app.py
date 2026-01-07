@@ -21,6 +21,8 @@ if "sq_step" not in st.session_state:
     st.session_state.sq_step = 0
 if "sq_play" not in st.session_state:
     st.session_state.sq_play = False
+if "sq_persist" not in st.session_state:
+    st.session_state.sq_persist = 0  # consecutive steps meeting RP condition
 
 # =====================================================
 # SandyOS Core
@@ -65,13 +67,13 @@ def square_step(df, t, grid=5, bgZ=0.90, bgS=0.10):
     rows = df[df["time"] == t]
     for _, r in rows.iterrows():
         i, j = int(r["i"]) - 1, int(r["j"]) - 1
-        Z[i, j] = r["confinement"]
-        S[i, j] = r["entropy"]
+        Z[i, j] = float(r["confinement"])
+        S[i, j] = float(r["entropy"])
 
     tau = (1 - Z) * S
     return Z, S, tau
 
-def square_rp(tau, thresh=0.20):
+def square_rp(tau, thresh=0.20, grid=5):
     hot = tau >= thresh
     visited = np.zeros_like(hot, bool)
 
@@ -81,7 +83,7 @@ def square_rp(tau, thresh=0.20):
         while stack:
             x, y = stack.pop()
             if (
-                x < 0 or x >= 5 or y < 0 or y >= 5
+                x < 0 or x >= grid or y < 0 or y >= grid
                 or visited[x, y] or not hot[x, y]
             ):
                 continue
@@ -91,8 +93,8 @@ def square_rp(tau, thresh=0.20):
         return size
 
     Amax = 0
-    for i in range(5):
-        for j in range(5):
+    for i in range(grid):
+        for j in range(grid):
             if hot[i, j] and not visited[i, j]:
                 Amax = max(Amax, dfs(i, j))
 
@@ -167,10 +169,15 @@ elif mode == "Paste CSV":
     )
 
 # =====================================================
-# SQUARE MODE (WITH PLAY)
+# SQUARE MODE (WITH PLAY + PERSISTENCE)
 # =====================================================
 
 else:
+    GRID = 5
+    RP_ASTAR = 3          # connected hot-region size needed
+    PERSIST_N = 2         # consecutive steps needed to confirm RP
+    TAU_THRESH = 0.20     # hot-cell threshold
+
     st.subheader("🟥 Volcano Square (5×5)")
 
     sq_text = st.text_area(
@@ -182,6 +189,13 @@ else:
         st.stop()
 
     sq_df = pd.read_csv(StringIO(sq_text))
+
+    # Basic validation for friendly failures
+    needed = {"time", "i", "j", "confinement", "entropy"}
+    if not needed.issubset(set(sq_df.columns)):
+        st.error("Square CSV must include: time,i,j,confinement,entropy")
+        st.stop()
+
     times = sorted(sq_df["time"].unique())
 
     st.sidebar.divider()
@@ -193,21 +207,39 @@ else:
     if c2.button("⏮ Reset"):
         st.session_state.sq_step = 0
         st.session_state.sq_play = False
+        st.session_state.sq_persist = 0
 
     sq_speed_ms = st.sidebar.slider("Play speed (ms)", 100, 2000, 500, 100)
 
-    st.session_state.sq_step = min(st.session_state.sq_step, len(times)-1)
+    # Clamp step safely
+    st.session_state.sq_step = min(st.session_state.sq_step, len(times) - 1)
     t = times[st.session_state.sq_step]
 
-    Zg, Sg, tau_g = square_step(sq_df, t)
-    hot, Amax = square_rp(tau_g)
+    Zg, Sg, tau_g = square_step(sq_df, t, grid=GRID)
+    hot, Amax = square_rp(tau_g, thresh=TAU_THRESH, grid=GRID)
+
+    # ---------------- Persistence logic ----------------
+    if Amax >= RP_ASTAR:
+        st.session_state.sq_persist += 1
+    else:
+        st.session_state.sq_persist = 0
+
+    square_rp_persistent = st.session_state.sq_persist >= PERSIST_N
 
     st.subheader(f"Square State — {t}")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Max τ̇", f"{tau_g.max():.3f}")
-    c2.metric("Hot region Aₘₐₓ", Amax)
-    c3.metric("Square RP", "YES" if Amax >= 3 else "NO")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Max τ̇", f"{tau_g.max():.3f}")
+    m2.metric("Hot region Aₘₐₓ", Amax)
+    m3.metric("Persistence", f"{st.session_state.sq_persist}/{PERSIST_N}")
+    m4.metric("Square RP", "YES" if square_rp_persistent else "NO")
+
+    if square_rp_persistent:
+        st.error("🚨 Sustained pathway detected (persistent Square RP)")
+    elif Amax >= RP_ASTAR:
+        st.warning("⚠️ Pathway forming — not yet persistent")
+    else:
+        st.success("✅ No sustained pathway")
 
     st.write("τ̇ field")
     st.dataframe(pd.DataFrame(tau_g))
