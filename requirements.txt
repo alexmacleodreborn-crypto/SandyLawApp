@@ -1,5 +1,5 @@
 streamlit>=1.31
 numpy
 pandas
-matplotlib
+matplotlib.pyplot
 sandyos-core
