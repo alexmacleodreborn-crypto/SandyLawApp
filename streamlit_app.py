@@ -6,6 +6,15 @@ import requests
 from io import StringIO
 
 # =====================================================
+# SESSION STATE (Play / Pause)
+# =====================================================
+
+if "play" not in st.session_state:
+    st.session_state.play = False
+if "step" not in st.session_state:
+    st.session_state.step = 0
+
+# =====================================================
 # SandyOS Core — INLINE (Cloud-Safe)
 # =====================================================
 
@@ -26,7 +35,6 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     Sigma = max(0.0, normalize(entropy))
     tau_rate = (1 - Z) * Sigma
 
-    # RP probability (logistic on slope)
     if len(tau_history) < 2:
         rp_prob = 0.0
     else:
@@ -66,6 +74,22 @@ history_len = st.sidebar.slider("History Length", 3, 50, 10)
 mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV"])
 
 # -----------------------------------------------------
+# Play / Pause Controls (CSV only)
+# -----------------------------------------------------
+
+if mode == "Paste CSV":
+    st.sidebar.divider()
+    st.sidebar.subheader("▶️ Time Evolution")
+
+    col1, col2 = st.sidebar.columns(2)
+    if col1.button("▶️ Play" if not st.session_state.play else "⏸ Pause"):
+        st.session_state.play = not st.session_state.play
+
+    if col2.button("⏮ Reset"):
+        st.session_state.step = 0
+        st.session_state.play = False
+
+# -----------------------------------------------------
 # Volcano Context (USGS HANS)
 # -----------------------------------------------------
 
@@ -91,12 +115,10 @@ try:
 
     volcano = volcano_lookup[selected_volcano]
 
-    st.sidebar.markdown("**Volcano details**")
     st.sidebar.write(f"Type: {volcano.get('volcanoType', 'n/a')}")
     st.sidebar.write(f"Region: {volcano.get('region', 'n/a')}")
     st.sidebar.write(f"Elevation: {volcano.get('elevation', 'n/a')} m")
 
-    # Optional RP threshold tuning by volcano type
     vtype = (volcano.get("volcanoType") or "").lower()
     if "shield" in vtype:
         theta_rp = min(theta_rp, 0.04)
@@ -134,18 +156,12 @@ else:
     csv_text = st.text_area(
         "Paste CSV here",
         height=250,
-        placeholder=(
-            "time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic\n"
-            "t1,0.92,0.88,0.12,0.05\n"
-            "t2,0.91,0.87,0.18,0.09\n"
-        ),
     )
 
     if not csv_text.strip():
         st.stop()
 
     df = pd.read_csv(StringIO(csv_text))
-
     conf_cols = df.filter(like="confinement")
     ent_cols = df.filter(like="entropy")
 
@@ -153,11 +169,14 @@ else:
         st.error("CSV must contain confinement_* and entropy_* columns")
         st.stop()
 
-    confinement = conf_cols.iloc[-1].tolist()
-    entropy = ent_cols.iloc[-1].tolist()
+    max_step = len(df) - 1
+    st.session_state.step = min(st.session_state.step, max_step)
+
+    confinement = conf_cols.iloc[st.session_state.step].tolist()
+    entropy = ent_cols.iloc[st.session_state.step].tolist()
 
     tau_history = []
-    for i in range(max(0, len(df) - history_len), len(df) - 1):
+    for i in range(max(0, st.session_state.step - history_len), st.session_state.step):
         z_i = normalize(conf_cols.iloc[i].tolist())
         s_i = normalize(ent_cols.iloc[i].tolist())
         tau_history.append((1 - z_i) * s_i)
@@ -170,6 +189,11 @@ Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
     confinement, entropy, tau_history, theta_rp
 )
 
+# Auto-advance when playing
+if mode == "Paste CSV" and st.session_state.play and st.session_state.step < max_step:
+    st.session_state.step += 1
+    st.experimental_rerun()
+
 # =====================================================
 # OUTPUT
 # =====================================================
@@ -177,12 +201,8 @@ Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
 st.divider()
 st.subheader("📊 SandyOS Output")
 
-if selected_volcano:
-    st.caption(
-        f"Context: {selected_volcano} "
-        f"({volcano.get('volcanoType', 'unknown type')}, "
-        f"{volcano.get('region', 'unknown region')})"
-    )
+if mode == "Paste CSV":
+    st.caption(f"⏱ Time step {st.session_state.step + 1} / {len(df)}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Z (Trap Strength)", f"{Z:.3f}")
@@ -199,25 +219,17 @@ else:
     st.success("✅ Stable / trapped regime")
 
 # =====================================================
-# REACTION POINT DETECTION (for plotting)
+# PLOT (RESTORED)
 # =====================================================
 
-rp_index = None
-rp_threshold_prob = 0.5  # conceptual RP crossing
+st.subheader("📈 Effective Evolution Rate")
 
-if len(tau_history) >= 2:
-    rp_probs = []
-    for i in range(1, len(tau_history) + 1):
-        prev_tau = tau_history[:i]
-        _, _, _, rp_p, _ = sandy_core(
-            confinement, entropy, prev_tau, theta_rp
-        )
-        rp_probs.append(rp_p)
+chart_df = pd.DataFrame({
+    "dτₛₗ/dt": tau_history + [tau_rate],
+    "RP Threshold": [theta_rp] * (len(tau_history) + 1),
+})
 
-    for i, p in enumerate(rp_probs):
-        if p >= rp_threshold_prob:
-            rp_index = i
-            break
+st.line_chart(chart_df)
 
 # =====================================================
 # EXPLAINABILITY
@@ -229,5 +241,5 @@ with st.expander("🧠 Explainability"):
     • **Σ** — how much disorder escapes  
     • **dτₛₗ/dt** — how fast change is allowed  
     • **RP probability** — warning before event  
-    • Volcano data provided by **USGS HANS API**
+    • Volcano context via **USGS HANS API**
     """)
