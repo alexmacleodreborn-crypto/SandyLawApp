@@ -221,7 +221,7 @@ if (
     if play_speed_ms is not None:
        time.sleep(play_speed_ms / 1000.0)
     st.session_state.step += 1
-    st.experimental_rerun()
+    st.rerun()
 
 # =====================================================
 # OUTPUT
