@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
+from io import StringIO
 
 # =====================================================
 # SandyOS Core — INLINE (Cloud-Safe)
@@ -33,7 +34,6 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
         rp_prob = clamp(rp_prob)
 
     confidence = clamp(min(1.0, (len(confinement) + len(entropy)) / 6))
-
     return Z, Sigma, tau_rate, rp_prob, confidence
 
 # =====================================================
@@ -48,10 +48,12 @@ st.caption("dτₛₗ/dt = (1 − Z) Σ")
 st.sidebar.header("⚙️ Controls")
 theta_rp = st.sidebar.slider("RP Threshold (Θᴿᴾ)", 0.0, 1.0, 0.05, 0.01)
 history_len = st.sidebar.slider("History Length", 3, 50, 10)
+mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV"])
 
-mode = st.sidebar.radio("Input Mode", ["Manual", "CSV"])
+# =====================================================
+# INPUT HANDLING
+# =====================================================
 
-# Inputs
 if mode == "Manual":
     st.subheader("🔒 Confinement (Z proxies)")
     confinement = [
@@ -71,29 +73,54 @@ if mode == "Manual":
 
 else:
     st.subheader("📋 Paste CSV Data")
-st.caption("Columns must include confinement_* and entropy_*")
+    st.caption("Columns must include confinement_* and entropy_*")
 
-csv_text = st.text_area(
-    "Paste CSV here",
-    height=250,
-    placeholder=(
-        "time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic\n"
-        "t1,0.92,0.88,0.12,0.05\n"
-        "t2,0.91,0.87,0.18,0.09\n"
-    ),
-)
+    csv_text = st.text_area(
+        "Paste CSV here",
+        height=250,
+        placeholder=(
+            "time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic\n"
+            "t1,0.92,0.88,0.12,0.05\n"
+            "t2,0.91,0.87,0.18,0.09\n"
+        ),
+    )
 
-if not csv_text.strip():
-    st.stop()
+    if not csv_text.strip():
+        st.stop()
 
-from io import StringIO
-df = pd.read_csv(StringIO(csv_text))
-# Run SandyOS
+    df = pd.read_csv(StringIO(csv_text))
+
+    # Validation
+    conf_cols = df.filter(like="confinement")
+    ent_cols = df.filter(like="entropy")
+
+    if conf_cols.empty or ent_cols.empty:
+        st.error("CSV must contain confinement_* and entropy_* columns")
+        st.stop()
+
+    # Current state = last row
+    confinement = conf_cols.iloc[-1].tolist()
+    entropy = ent_cols.iloc[-1].tolist()
+
+    # Build τ history from earlier rows
+    tau_history = []
+    for i in range(max(0, len(df) - history_len), len(df) - 1):
+        z_i = normalize(conf_cols.iloc[i].tolist())
+        s_i = normalize(ent_cols.iloc[i].tolist())
+        tau_history.append((1 - z_i) * s_i)
+
+# =====================================================
+# RUN SANDYOS
+# =====================================================
+
 Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
     confinement, entropy, tau_history, theta_rp
 )
 
-# Display
+# =====================================================
+# OUTPUT
+# =====================================================
+
 st.divider()
 st.subheader("📊 SandyOS Output")
 
@@ -104,7 +131,6 @@ c3.metric("dτₛₗ/dt", f"{tau_rate:.4f}")
 c4.metric("RP Probability", f"{rp_prob:.1%}")
 c5.metric("Confidence", f"{confidence:.1%}")
 
-# Status
 if rp_prob > 0.75:
     st.error("🚨 Reaction Point likely — TRANSITION phase")
 elif rp_prob > 0.4:
@@ -112,7 +138,10 @@ elif rp_prob > 0.4:
 else:
     st.success("✅ Stable / trapped regime")
 
-# Plot (Streamlit native)
+# =====================================================
+# PLOT
+# =====================================================
+
 st.subheader("📈 Effective Evolution Rate")
 chart_df = pd.DataFrame({
     "dτₛₗ/dt": tau_history + [tau_rate],
@@ -120,11 +149,14 @@ chart_df = pd.DataFrame({
 })
 st.line_chart(chart_df)
 
-# Explainability
+# =====================================================
+# EXPLAINABILITY
+# =====================================================
+
 with st.expander("🧠 Explainability"):
     st.markdown("""
     • **Z** — how trapped the system is  
     • **Σ** — how much disorder escapes  
     • **dτₛₗ/dt** — how fast change is allowed  
-    • **RP probability** — *warning before event*
+    • **RP probability** — warning before event
     """)
