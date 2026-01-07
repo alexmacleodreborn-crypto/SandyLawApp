@@ -199,15 +199,25 @@ else:
     st.success("✅ Stable / trapped regime")
 
 # =====================================================
-# PLOT
+# REACTION POINT DETECTION (for plotting)
 # =====================================================
 
-st.subheader("📈 Effective Evolution Rate")
-chart_df = pd.DataFrame({
-    "dτₛₗ/dt": tau_history + [tau_rate],
-    "RP Threshold": [theta_rp] * (len(tau_history) + 1),
-})
-st.line_chart(chart_df)
+rp_index = None
+rp_threshold_prob = 0.5  # conceptual RP crossing
+
+if len(tau_history) >= 2:
+    rp_probs = []
+    for i in range(1, len(tau_history) + 1):
+        prev_tau = tau_history[:i]
+        _, _, _, rp_p, _ = sandy_core(
+            confinement, entropy, prev_tau, theta_rp
+        )
+        rp_probs.append(rp_p)
+
+    for i, p in enumerate(rp_probs):
+        if p >= rp_threshold_prob:
+            rp_index = i
+            break
 
 # =====================================================
 # EXPLAINABILITY
