@@ -70,16 +70,24 @@ if mode == "Manual":
     tau_history = list(np.linspace(0.01, 0.03, history_len))
 
 else:
-    st.subheader("📂 Upload CSV")
-    file = st.file_uploader("CSV with confinement_* and entropy_* columns", type="csv")
-    if file is None:
-        st.stop()
+    st.subheader("📋 Paste CSV Data")
+st.caption("Columns must include confinement_* and entropy_*")
 
-    df = pd.read_csv(file)
-    confinement = df.filter(like="confinement").iloc[-1].tolist()
-    entropy = df.filter(like="entropy").iloc[-1].tolist()
-    tau_history = df.get("tau_rate", pd.Series()).tail(history_len).tolist()
+csv_text = st.text_area(
+    "Paste CSV here",
+    height=250,
+    placeholder=(
+        "time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic\n"
+        "t1,0.92,0.88,0.12,0.05\n"
+        "t2,0.91,0.87,0.18,0.09\n"
+    ),
+)
 
+if not csv_text.strip():
+    st.stop()
+
+from io import StringIO
+df = pd.read_csv(StringIO(csv_text))
 # Run SandyOS
 Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
     confinement, entropy, tau_history, theta_rp
