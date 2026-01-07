@@ -13,6 +13,8 @@ if "play" not in st.session_state:
     st.session_state.play = False
 if "step" not in st.session_state:
     st.session_state.step = 0
+if "max_step" not in st.session_state:
+    st.session_state.max_step = 0
 
 # =====================================================
 # SandyOS Core — INLINE (Cloud-Safe)
@@ -35,10 +37,16 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     Sigma = max(0.0, normalize(entropy))
     tau_rate = (1 - Z) * Sigma
 
+    # RP probability (logistic on slope)
+    # FIX: use a short-window mean to detect acceleration (restores RP in CSV playback)
     if len(tau_history) < 2:
         rp_prob = 0.0
     else:
-        slope = tau_rate - tau_history[-1]
+        if len(tau_history) >= 3:
+            slope = tau_rate - float(np.mean(tau_history[-3:]))
+        else:
+            slope = tau_rate - tau_history[-1]
+
         rp_prob = 1 / (1 + math.exp(-15 * (slope - theta_rp)))
         rp_prob = clamp(rp_prob)
 
@@ -77,6 +85,7 @@ mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV"])
 # Play / Pause Controls (CSV only)
 # -----------------------------------------------------
 
+play_speed_ms = None
 if mode == "Paste CSV":
     st.sidebar.divider()
     st.sidebar.subheader("▶️ Time Evolution")
@@ -88,6 +97,8 @@ if mode == "Paste CSV":
     if col2.button("⏮ Reset"):
         st.session_state.step = 0
         st.session_state.play = False
+
+    play_speed_ms = st.sidebar.slider("Play speed (ms)", 50, 1500, 350, 50)
 
 # -----------------------------------------------------
 # Volcano Context (USGS HANS)
@@ -119,6 +130,7 @@ try:
     st.sidebar.write(f"Region: {volcano.get('region', 'n/a')}")
     st.sidebar.write(f"Elevation: {volcano.get('elevation', 'n/a')} m")
 
+    # Optional RP threshold tuning by volcano type
     vtype = (volcano.get("volcanoType") or "").lower()
     if "shield" in vtype:
         theta_rp = min(theta_rp, 0.04)
@@ -131,6 +143,8 @@ except Exception:
 # =====================================================
 # INPUT HANDLING
 # =====================================================
+
+df = None  # for safe references later
 
 if mode == "Manual":
     st.subheader("🔒 Confinement (Z proxies)")
@@ -156,6 +170,12 @@ else:
     csv_text = st.text_area(
         "Paste CSV here",
         height=250,
+        placeholder=(
+            "time,confinement_crust,confinement_pressure,confinement_plug,entropy_gas,entropy_seismic,entropy_deformation\n"
+            "t0,0.96,0.94,0.95,0.05,0.04,0.03\n"
+            "t1,0.96,0.94,0.95,0.06,0.05,0.04\n"
+            "t2,0.95,0.93,0.94,0.08,0.07,0.05\n"
+        ),
     )
 
     if not csv_text.strip():
@@ -169,8 +189,9 @@ else:
         st.error("CSV must contain confinement_* and entropy_* columns")
         st.stop()
 
-    max_step = len(df) - 1
-    st.session_state.step = min(st.session_state.step, max_step)
+    # FIX: store max_step in session_state so it's always defined (prevents Play crash)
+    st.session_state.max_step = len(df) - 1
+    st.session_state.step = min(st.session_state.step, st.session_state.max_step)
 
     confinement = conf_cols.iloc[st.session_state.step].tolist()
     entropy = ent_cols.iloc[st.session_state.step].tolist()
@@ -189,8 +210,15 @@ Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
     confinement, entropy, tau_history, theta_rp
 )
 
-# Auto-advance when playing
-if mode == "Paste CSV" and st.session_state.play and st.session_state.step < max_step:
+# Auto-advance when playing (FIXED)
+if (
+    mode == "Paste CSV"
+    and st.session_state.play
+    and st.session_state.step < st.session_state.max_step
+):
+    # small delay so Play is readable
+    if play_speed_ms is not None:
+        st.sleep(play_speed_ms / 1000.0)
     st.session_state.step += 1
     st.experimental_rerun()
 
@@ -201,7 +229,14 @@ if mode == "Paste CSV" and st.session_state.play and st.session_state.step < max
 st.divider()
 st.subheader("📊 SandyOS Output")
 
-if mode == "Paste CSV":
+if selected_volcano and volcano:
+    st.caption(
+        f"Context: {selected_volcano} "
+        f"({volcano.get('volcanoType', 'unknown type')}, "
+        f"{volcano.get('region', 'unknown region')})"
+    )
+
+if mode == "Paste CSV" and df is not None:
     st.caption(f"⏱ Time step {st.session_state.step + 1} / {len(df)}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -219,7 +254,7 @@ else:
     st.success("✅ Stable / trapped regime")
 
 # =====================================================
-# PLOT (RESTORED)
+# PLOT
 # =====================================================
 
 st.subheader("📈 Effective Evolution Rate")
