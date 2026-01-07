@@ -7,7 +7,7 @@ from io import StringIO
 import time
 
 # =====================================================
-# SESSION STATE (Play / Pause)
+# SESSION STATE
 # =====================================================
 
 if "play" not in st.session_state:
@@ -16,9 +16,11 @@ if "step" not in st.session_state:
     st.session_state.step = 0
 if "max_step" not in st.session_state:
     st.session_state.max_step = 0
+if "sq_step" not in st.session_state:
+    st.session_state.sq_step = 0
 
 # =====================================================
-# SandyOS Core — INLINE (Cloud-Safe)
+# SandyOS Core
 # =====================================================
 
 def normalize(values):
@@ -38,8 +40,6 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     Sigma = max(0.0, normalize(entropy))
     tau_rate = (1 - Z) * Sigma
 
-    # RP probability (logistic on slope)
-    # FIX: use a short-window mean to detect acceleration (restores RP in CSV playback)
     if len(tau_history) < 2:
         rp_prob = 0.0
     else:
@@ -47,7 +47,6 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
             slope = tau_rate - float(np.mean(tau_history[-3:]))
         else:
             slope = tau_rate - tau_history[-1]
-
         rp_prob = 1 / (1 + math.exp(-15 * (slope - theta_rp)))
         rp_prob = clamp(rp_prob)
 
@@ -55,107 +54,78 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     return Z, Sigma, tau_rate, rp_prob, confidence
 
 # =====================================================
-# USGS HANS Volcano API (Context Layer)
+# Volcano Square Engine (NEW)
 # =====================================================
 
-@st.cache_data(ttl=3600)
-def fetch_usgs_volcanoes():
-    url = "https://volcanoes.usgs.gov/hans-public/api/volcano/"
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    return r.json()
+def square_step(df, t, grid=5, bgZ=0.90, bgS=0.10):
+    Z = np.full((grid, grid), bgZ)
+    S = np.full((grid, grid), bgS)
+
+    rows = df[df["time"] == t]
+    for _, r in rows.iterrows():
+        i, j = int(r["i"]) - 1, int(r["j"]) - 1
+        Z[i, j] = r["confinement"]
+        S[i, j] = r["entropy"]
+
+    tau = (1 - Z) * S
+    return Z, S, tau
+
+def square_rp(tau, thresh=0.20):
+    hot = tau >= thresh
+    visited = np.zeros_like(hot, bool)
+
+    def dfs(i, j):
+        stack = [(i, j)]
+        size = 0
+        while stack:
+            x, y = stack.pop()
+            if (
+                x < 0 or x >= 5 or y < 0 or y >= 5
+                or visited[x, y] or not hot[x, y]
+            ):
+                continue
+            visited[x, y] = True
+            size += 1
+            stack.extend([(x+1,y),(x-1,y),(x,y+1),(x,y-1)])
+        return size
+
+    Amax = 0
+    for i in range(5):
+        for j in range(5):
+            if hot[i, j] and not visited[i, j]:
+                Amax = max(Amax, dfs(i, j))
+
+    return hot, Amax
 
 # =====================================================
-# Streamlit UI
+# UI
 # =====================================================
 
 st.set_page_config(page_title="SandyOS", layout="wide")
 st.title("🧭 SandyOS — Effective Time & Reaction Point Monitor")
 st.caption("dτₛₗ/dt = (1 − Z) Σ")
 
-# =====================================================
-# SIDEBAR CONTROLS
-# =====================================================
-
 st.sidebar.header("⚙️ Controls")
-theta_rp_user = st.sidebar.slider("RP Threshold (Θᴿᴾ)", 0.0, 1.0, 0.05, 0.01)
+theta_rp = st.sidebar.slider("RP Threshold Θᴿᴾ", 0.0, 1.0, 0.05, 0.01)
 history_len = st.sidebar.slider("History Length", 3, 50, 10)
-mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV"])
-
-# -----------------------------------------------------
-# Play / Pause Controls (CSV only)
-# -----------------------------------------------------
-
-play_speed_ms = None
-if mode == "Paste CSV":
-    st.sidebar.divider()
-    st.sidebar.subheader("▶️ Time Evolution")
-
-    col1, col2 = st.sidebar.columns(2)
-    if col1.button("▶️ Play" if not st.session_state.play else "⏸ Pause"):
-        st.session_state.play = not st.session_state.play
-
-    if col2.button("⏮ Reset"):
-        st.session_state.step = 0
-        st.session_state.play = False
-
-    play_speed_ms = st.sidebar.slider("Play speed (ms)", 50, 1500, 350, 50)
-
-# -----------------------------------------------------
-# Volcano Context (USGS HANS)
-# -----------------------------------------------------
-
-st.sidebar.divider()
-st.sidebar.subheader("🌋 Volcano Context (USGS HANS)")
-
-theta_rp = theta_rp_user
-volcano = None
-selected_volcano = None
-
-try:
-    volcanoes = fetch_usgs_volcanoes()
-    volcano_lookup = {
-        v.get("volcanoName"): v
-        for v in volcanoes
-        if v.get("volcanoName")
-    }
-
-    selected_volcano = st.sidebar.selectbox(
-        "Select volcano",
-        sorted(volcano_lookup.keys())
-    )
-
-    volcano = volcano_lookup[selected_volcano]
-
-    st.sidebar.write(f"Type: {volcano.get('volcanoType', 'n/a')}")
-    st.sidebar.write(f"Region: {volcano.get('region', 'n/a')}")
-    st.sidebar.write(f"Elevation: {volcano.get('elevation', 'n/a')} m")
-
-    # Optional RP threshold tuning by volcano type
-    vtype = (volcano.get("volcanoType") or "").lower()
-    if "shield" in vtype:
-        theta_rp = min(theta_rp, 0.04)
-    elif "strato" in vtype:
-        theta_rp = max(theta_rp, 0.06)
-
-except Exception:
-    st.sidebar.warning("USGS volcano list unavailable")
+mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV", "Square"])
 
 # =====================================================
-# INPUT HANDLING
+# INPUT MODES
 # =====================================================
 
-df = None  # for safe references later
+df = None
 
+# ---------------- MANUAL ----------------
 if mode == "Manual":
-    st.subheader("🔒 Confinement (Z proxies)")
+    st.subheader("Manual Input")
+
     confinement = [
         st.slider("Confinement 1", 0.0, 1.0, 0.85),
         st.slider("Confinement 2", 0.0, 1.0, 0.90),
         st.slider("Confinement 3", 0.0, 1.0, 0.80),
     ]
 
-    st.subheader("🌊 Entropy Export (Σ proxies)")
     entropy = [
         st.slider("Entropy 1", 0.0, 1.0, 0.20),
         st.slider("Entropy 2", 0.0, 1.0, 0.35),
@@ -163,22 +133,15 @@ if mode == "Manual":
     ]
 
     tau_history = list(np.linspace(0.01, 0.03, history_len))
-
-else:
-    st.subheader("📋 Paste CSV Data")
-    st.caption("Columns must include confinement_* and entropy_*")
-
-    csv_text = st.text_area(
-        "Paste CSV here",
-        height=250,
-        placeholder=(
-            "time,confinement_crust,confinement_pressure,confinement_plug,entropy_gas,entropy_seismic,entropy_deformation\n"
-            "t0,0.96,0.94,0.95,0.05,0.04,0.03\n"
-            "t1,0.96,0.94,0.95,0.06,0.05,0.04\n"
-            "t2,0.95,0.93,0.94,0.08,0.07,0.05\n"
-        ),
+    Z, Sigma, tau_rate, rp_prob, conf = sandy_core(
+        confinement, entropy, tau_history, theta_rp
     )
 
+# ---------------- CSV ----------------
+elif mode == "Paste CSV":
+    st.subheader("Paste Time CSV")
+
+    csv_text = st.text_area("Paste CSV", height=220)
     if not csv_text.strip():
         st.stop()
 
@@ -186,11 +149,6 @@ else:
     conf_cols = df.filter(like="confinement")
     ent_cols = df.filter(like="entropy")
 
-    if conf_cols.empty or ent_cols.empty:
-        st.error("CSV must contain confinement_* and entropy_* columns")
-        st.stop()
-
-    # FIX: store max_step in session_state so it's always defined (prevents Play crash)
     st.session_state.max_step = len(df) - 1
     st.session_state.step = min(st.session_state.step, st.session_state.max_step)
 
@@ -203,79 +161,78 @@ else:
         s_i = normalize(ent_cols.iloc[i].tolist())
         tau_history.append((1 - z_i) * s_i)
 
-# =====================================================
-# RUN SANDYOS
-# =====================================================
+    Z, Sigma, tau_rate, rp_prob, conf = sandy_core(
+        confinement, entropy, tau_history, theta_rp
+    )
 
-Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
-    confinement, entropy, tau_history, theta_rp
-)
+# ---------------- SQUARE ----------------
+else:
+    st.subheader("🟥 Volcano Square (5×5)")
 
-# Auto-advance when playing (FIXED)
-if (
-    mode == "Paste CSV"
-    and st.session_state.play
-    and st.session_state.step < st.session_state.max_step
-):
-    # small delay so Play is readable
-    if play_speed_ms is not None:
-       time.sleep(play_speed_ms / 1000.0)
-    st.session_state.step += 1
-    st.rerun()
+    sq_text = st.text_area(
+        "Paste Square CSV",
+        height=250,
+        placeholder="time,i,j,confinement,entropy"
+    )
+    if not sq_text.strip():
+        st.stop()
+
+    sq_df = pd.read_csv(StringIO(sq_text))
+    times = sorted(sq_df["time"].unique())
+
+    st.session_state.sq_step = min(st.session_state.sq_step, len(times)-1)
+    t = times[st.session_state.sq_step]
+
+    Zg, Sg, tau_g = square_step(sq_df, t)
+    hot, Amax = square_rp(tau_g)
+
+    st.subheader(f"Square State — {t}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Max τ̇", f"{tau_g.max():.3f}")
+    c2.metric("Hot region Aₘₐₓ", Amax)
+    c3.metric("Square RP", "YES" if Amax >= 3 else "NO")
+
+    st.write("τ̇ field")
+    st.dataframe(pd.DataFrame(tau_g).style.background_gradient("inferno"))
+
+    st.write("Hot cells (1 = hot)")
+    st.dataframe(pd.DataFrame(hot.astype(int)))
+
+    col1, col2 = st.columns(2)
+    if col1.button("▶ Next"):
+        st.session_state.sq_step += 1
+        st.rerun()
+    if col2.button("⏮ Reset"):
+        st.session_state.sq_step = 0
+        st.rerun()
+
+    st.stop()
 
 # =====================================================
-# OUTPUT
+# OUTPUT (Manual / CSV)
 # =====================================================
 
 st.divider()
-st.subheader("📊 SandyOS Output")
-
-if selected_volcano and volcano:
-    st.caption(
-        f"Context: {selected_volcano} "
-        f"({volcano.get('volcanoType', 'unknown type')}, "
-        f"{volcano.get('region', 'unknown region')})"
-    )
-
-if mode == "Paste CSV" and df is not None:
-    st.caption(f"⏱ Time step {st.session_state.step + 1} / {len(df)}")
+st.subheader("SandyOS Output")
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Z (Trap Strength)", f"{Z:.3f}")
-c2.metric("Σ (Entropy Export)", f"{Sigma:.3f}")
-c3.metric("dτₛₗ/dt", f"{tau_rate:.4f}")
-c4.metric("RP Probability", f"{rp_prob:.1%}")
-c5.metric("Confidence", f"{confidence:.1%}")
+c1.metric("Z", f"{Z:.3f}")
+c2.metric("Σ", f"{Sigma:.3f}")
+c3.metric("τ̇", f"{tau_rate:.4f}")
+c4.metric("RP", f"{rp_prob:.1%}")
+c5.metric("Confidence", f"{conf:.1%}")
 
 if rp_prob > 0.75:
-    st.error("🚨 Reaction Point likely — TRANSITION phase")
+    st.error("🚨 TRANSITION")
 elif rp_prob > 0.4:
-    st.warning("⚠️ RP watch — system softening")
+    st.warning("⚠️ RP Watch")
 else:
-    st.success("✅ Stable / trapped regime")
+    st.success("✅ Stable")
 
-# =====================================================
-# PLOT
-# =====================================================
-
-st.subheader("📈 Effective Evolution Rate")
-
+st.subheader("Evolution")
 chart_df = pd.DataFrame({
-    "dτₛₗ/dt": tau_history + [tau_rate],
-    "RP Threshold": [theta_rp] * (len(tau_history) + 1),
+    "τ̇": tau_history + [tau_rate],
+    "Θᴿᴾ": [theta_rp] * (len(tau_history) + 1)
 })
-
 st.line_chart(chart_df)
-
-# =====================================================
-# EXPLAINABILITY
-# =====================================================
-
-with st.expander("🧠 Explainability"):
-    st.markdown("""
-    • **Z** — how trapped the system is  
-    • **Σ** — how much disorder escapes  
-    • **dτₛₗ/dt** — how fast change is allowed  
-    • **RP probability** — warning before event  
-    • Volcano context via **USGS HANS API**
-    """)
