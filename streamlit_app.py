@@ -9,275 +9,224 @@ import time
 # SESSION STATE
 # =====================================================
 
-# Scalar (time-series)
-if "step" not in st.session_state:
-    st.session_state.step = 0
-if "max_step" not in st.session_state:
-    st.session_state.max_step = 0
+if "scalar_step" not in st.session_state:
+    st.session_state.scalar_step = 0
+if "scalar_play" not in st.session_state:
+    st.session_state.scalar_play = False
 
-# Square (spatial)
-if "sq_step" not in st.session_state:
-    st.session_state.sq_step = 0
-if "sq_play" not in st.session_state:
-    st.session_state.sq_play = False
-if "sq_persist" not in st.session_state:
-    st.session_state.sq_persist = 0
+if "square_step" not in st.session_state:
+    st.session_state.square_step = 0
+if "square_play" not in st.session_state:
+    st.session_state.square_play = False
+if "square_persist" not in st.session_state:
+    st.session_state.square_persist = 0
 
 # =====================================================
-# CORE MATH (SCALAR)
+# CORE FUNCTIONS
 # =====================================================
 
-def normalize(values):
-    xs = [float(v) for v in values if v is not None]
-    if not xs:
-        return 0.0
-    lo, hi = min(xs), max(xs)
-    if hi == lo:
+def normalize(vals):
+    v = np.array(vals, dtype=float)
+    if v.max() == v.min():
         return 0.5
-    return sum((x - lo) / (hi - lo) for x in xs) / len(xs)
+    return np.mean((v - v.min()) / (v.max() - v.min()))
 
-def clamp(x, lo=0.0, hi=1.0):
-    return max(lo, min(hi, x))
-
-def sandy_scalar(confinement, entropy, tau_history, theta_rp):
-    Z = clamp(normalize(confinement))
-    Sigma = clamp(normalize(entropy))
-    tau_rate = (1 - Z) * Sigma
-
-    if len(tau_history) < 2:
-        rp_prob = 0.0
-    else:
-        base = np.mean(tau_history[-3:]) if len(tau_history) >= 3 else tau_history[-1]
-        slope = tau_rate - base
-        rp_prob = clamp(1 / (1 + math.exp(-15 * (slope - theta_rp))))
-
-    confidence = clamp(min(1.0, (len(confinement) + len(entropy)) / 6))
-    return Z, Sigma, tau_rate, rp_prob, confidence
-
-# =====================================================
-# CORE MATH (SQUARE)
-# =====================================================
-
-def square_step(df, t, grid=5, bgZ=0.90, bgS=0.10):
-    Z = np.full((grid, grid), bgZ)
-    S = np.full((grid, grid), bgS)
-
-    rows = df[df["time"] == t]
-    for _, r in rows.iterrows():
-        i, j = int(r["i"]) - 1, int(r["j"]) - 1
-        Z[i, j] = float(r["confinement"])
-        S[i, j] = float(r["entropy"])
-
+def sandy_scalar(conf, ent, hist, theta):
+    Z = normalize(conf)
+    S = normalize(ent)
     tau = (1 - Z) * S
-    return tau
 
-def square_connected_region(tau, thresh=0.20, grid=5):
+    if len(hist) < 2:
+        rp = 0.0
+    else:
+        base = np.mean(hist[-3:]) if len(hist) >= 3 else hist[-1]
+        slope = tau - base
+        rp = 1 / (1 + math.exp(-15 * (slope - theta)))
+
+    return Z, S, tau, rp
+
+# ---------------- Square ----------------
+
+def square_tau(df, t, grid=5):
+    Z = np.full((grid, grid), 0.9)
+    S = np.full((grid, grid), 0.1)
+
+    for _, r in df[df.time == t].iterrows():
+        i, j = int(r.i) - 1, int(r.j) - 1
+        Z[i, j] = r.confinement
+        S[i, j] = r.entropy
+
+    return (1 - Z) * S
+
+def square_rp(tau, thresh):
     hot = tau >= thresh
-    visited = np.zeros_like(hot, bool)
+    visited = np.zeros_like(hot)
 
     def dfs(i, j):
         stack = [(i, j)]
-        size = 0
+        s = 0
         while stack:
             x, y = stack.pop()
             if (
-                x < 0 or x >= grid or y < 0 or y >= grid
+                x < 0 or y < 0 or x >= 5 or y >= 5
                 or visited[x, y] or not hot[x, y]
             ):
                 continue
-            visited[x, y] = True
-            size += 1
-            stack.extend([(x+1,y),(x-1,y),(x,y+1),(x,y-1)])
-        return size
+            visited[x, y] = 1
+            s += 1
+            stack += [(x+1,y),(x-1,y),(x,y+1),(x,y-1)]
+        return s
 
     Amax = 0
-    for i in range(grid):
-        for j in range(grid):
-            if hot[i, j] and not visited[i, j]:
-                Amax = max(Amax, dfs(i, j))
-
+    for i in range(5):
+        for j in range(5):
+            if hot[i,j] and not visited[i,j]:
+                Amax = max(Amax, dfs(i,j))
     return hot, Amax
 
 # =====================================================
 # UI
 # =====================================================
 
-st.set_page_config(page_title="SandyOS", layout="wide")
-st.title("🧭 SandyOS")
-st.caption("Reaction Points from entropy under confinement")
+st.set_page_config("SandyOS", layout="wide")
+st.title("🧭 SandyOS — Scalar & Square RP Monitor")
 
-st.sidebar.header("⚙️ Mode")
-mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV", "Square"])
+mode = st.sidebar.radio("Mode", ["Scalar CSV", "Square 5×5"])
 
 # =====================================================
-# SIDEBAR CONTROLS (OPTION A)
+# SCALAR MODE
 # =====================================================
 
-if mode in ["Manual", "Paste CSV"]:
+if mode == "Scalar CSV":
     st.sidebar.subheader("Scalar Controls")
-    theta_rp = st.sidebar.slider("RP Threshold Θᴿᴾ", 0.0, 1.0, 0.05, 0.01)
-    history_len = st.sidebar.slider("History Length", 3, 50, 10)
-else:
-    theta_rp = 0.05
-    history_len = 10
+    theta = st.sidebar.slider("RP Threshold Θᴿᴾ", 0.0, 1.0, 0.05, 0.01)
+    speed = st.sidebar.slider("Play speed (ms)", 200, 2000, 600, 100)
 
-if mode == "Square":
-    st.sidebar.divider()
-    st.sidebar.subheader("Square Controls")
-
-    square_tau_thresh = st.sidebar.slider(
-        "Square τ̇ threshold",
-        0.05, 0.50, 0.20, 0.01
-    )
-    square_persist_n = st.sidebar.slider(
-        "Persistence (steps)",
-        1, 5, 2
-    )
-
-    play_speed_ms = st.sidebar.slider(
-        "Play speed (ms)",
-        200, 2000, 600, 100
-    )
-
-# =====================================================
-# MANUAL MODE
-# =====================================================
-
-if mode == "Manual":
-    st.subheader("Manual Scalar Input")
-
-    confinement = [
-        st.slider("Confinement 1", 0.0, 1.0, 0.85),
-        st.slider("Confinement 2", 0.0, 1.0, 0.90),
-        st.slider("Confinement 3", 0.0, 1.0, 0.80),
-    ]
-    entropy = [
-        st.slider("Entropy 1", 0.0, 1.0, 0.20),
-        st.slider("Entropy 2", 0.0, 1.0, 0.35),
-        st.slider("Entropy 3", 0.0, 1.0, 0.10),
-    ]
-
-    tau_history = list(np.linspace(0.01, 0.03, history_len))
-    Z, Sigma, tau_rate, rp_prob, conf = sandy_scalar(
-        confinement, entropy, tau_history, theta_rp
-    )
-
-# =====================================================
-# CSV MODE
-# =====================================================
-
-elif mode == "Paste CSV":
     st.subheader("Paste Scalar CSV")
 
-    csv_text = st.text_area("Paste CSV", height=220)
+    csv_text = st.text_area(
+        "CSV",
+        height=220,
+        placeholder="""time,confinement_crust,confinement_pressure,entropy_gas,entropy_seismic
+t0,0.97,0.96,0.03,0.02
+t1,0.96,0.95,0.06,0.05
+t2,0.94,0.93,0.10,0.08
+t3,0.91,0.89,0.16,0.14
+t4,0.87,0.85,0.23,0.20"""
+    )
+
     if not csv_text.strip():
         st.stop()
 
     df = pd.read_csv(StringIO(csv_text))
+    max_step = len(df) - 1
+    st.session_state.scalar_step = min(st.session_state.scalar_step, max_step)
+
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("▶️ Play" if not st.session_state.scalar_play else "⏸ Pause"):
+        st.session_state.scalar_play = not st.session_state.scalar_play
+    if c2.button("⏮ Reset"):
+        st.session_state.scalar_step = 0
+        st.session_state.scalar_play = False
+
     conf_cols = df.filter(like="confinement")
     ent_cols = df.filter(like="entropy")
 
-    st.session_state.max_step = len(df) - 1
-    st.session_state.step = min(st.session_state.step, st.session_state.max_step)
+    tau_hist = []
+    for i in range(st.session_state.scalar_step):
+        z = normalize(conf_cols.iloc[i])
+        s = normalize(ent_cols.iloc[i])
+        tau_hist.append((1 - z) * s)
 
-    confinement = conf_cols.iloc[st.session_state.step].tolist()
-    entropy = ent_cols.iloc[st.session_state.step].tolist()
+    conf = conf_cols.iloc[st.session_state.scalar_step]
+    ent = ent_cols.iloc[st.session_state.scalar_step]
 
-    tau_history = []
-    for i in range(max(0, st.session_state.step - history_len), st.session_state.step):
-        z_i = normalize(conf_cols.iloc[i].tolist())
-        s_i = normalize(ent_cols.iloc[i].tolist())
-        tau_history.append((1 - z_i) * s_i)
+    Z, S, tau, rp = sandy_scalar(conf, ent, tau_hist, theta)
 
-    Z, Sigma, tau_rate, rp_prob, conf = sandy_scalar(
-        confinement, entropy, tau_history, theta_rp
-    )
+    st.subheader(f"Step {st.session_state.scalar_step+1}/{len(df)}")
+
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("Z", f"{Z:.3f}")
+    m2.metric("Σ", f"{S:.3f}")
+    m3.metric("τ̇", f"{tau:.4f}")
+    m4.metric("RP", f"{rp:.1%}")
+
+    chart = pd.DataFrame({
+        "τ̇": tau_hist + [tau],
+        "Θᴿᴾ": [theta] * (len(tau_hist)+1)
+    })
+    st.line_chart(chart)
+
+    if st.session_state.scalar_play and st.session_state.scalar_step < max_step:
+        time.sleep(speed/1000)
+        st.session_state.scalar_step += 1
+        st.rerun()
 
 # =====================================================
 # SQUARE MODE
 # =====================================================
 
 else:
-    st.subheader("🟥 Square Mode (Spatial RP)")
-    st.info("Square mode uses spatial percolation + persistence. Scalar controls do not apply.")
+    st.sidebar.subheader("Square Controls")
+    thresh = st.sidebar.slider("τ̇ threshold", 0.05, 0.5, 0.2, 0.01)
+    persist_n = st.sidebar.slider("Persistence", 1, 5, 2)
+    speed = st.sidebar.slider("Play speed (ms)", 200, 2000, 600, 100)
+
+    st.subheader("Paste Square CSV")
 
     sq_text = st.text_area(
-        "Paste Square CSV",
+        "CSV",
         height=260,
-        placeholder="time,i,j,confinement,entropy"
+        placeholder="""time,i,j,confinement,entropy
+t0,3,3,0.95,0.05
+t1,3,3,0.92,0.08
+t1,3,4,0.93,0.07
+t2,3,3,0.90,0.12
+t2,3,4,0.90,0.11
+t2,4,3,0.91,0.10
+t3,3,3,0.88,0.18
+t3,3,4,0.87,0.17
+t3,4,3,0.86,0.16"""
     )
+
     if not sq_text.strip():
         st.stop()
 
-    sq_df = pd.read_csv(StringIO(sq_text))
-    times = sorted(sq_df["time"].unique())
+    sq = pd.read_csv(StringIO(sq_text))
+    times = sorted(sq.time.unique())
+    st.session_state.square_step = min(st.session_state.square_step, len(times)-1)
+    t = times[st.session_state.square_step]
 
-    c1, c2 = st.sidebar.columns(2)
-    if c1.button("▶️ Play" if not st.session_state.sq_play else "⏸ Pause"):
-        st.session_state.sq_play = not st.session_state.sq_play
+    c1,c2 = st.sidebar.columns(2)
+    if c1.button("▶️ Play" if not st.session_state.square_play else "⏸ Pause"):
+        st.session_state.square_play = not st.session_state.square_play
     if c2.button("⏮ Reset"):
-        st.session_state.sq_step = 0
-        st.session_state.sq_persist = 0
-        st.session_state.sq_play = False
+        st.session_state.square_step = 0
+        st.session_state.square_persist = 0
+        st.session_state.square_play = False
 
-    st.session_state.sq_step = min(st.session_state.sq_step, len(times) - 1)
-    t = times[st.session_state.sq_step]
-
-    tau = square_step(sq_df, t)
-    hot, Amax = square_connected_region(tau, square_tau_thresh)
+    tau = square_tau(sq, t)
+    hot, Amax = square_rp(tau, thresh)
 
     if Amax >= 3:
-        st.session_state.sq_persist += 1
+        st.session_state.square_persist += 1
     else:
-        st.session_state.sq_persist = 0
+        st.session_state.square_persist = 0
 
-    square_rp = st.session_state.sq_persist >= square_persist_n
+    rp = st.session_state.square_persist >= persist_n
 
-    st.subheader(f"Square State — {t}")
+    st.subheader(f"Square time {t}")
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1,m2,m3,m4 = st.columns(4)
     m1.metric("Max τ̇", f"{tau.max():.3f}")
-    m2.metric("Hot region Aₘₐₓ", Amax)
-    m3.metric("Persistence", f"{st.session_state.sq_persist}/{square_persist_n}")
-    m4.metric("Square RP", "YES" if square_rp else "NO")
+    m2.metric("Hot Aₘₐₓ", Amax)
+    m3.metric("Persistence", f"{st.session_state.square_persist}/{persist_n}")
+    m4.metric("Square RP", "YES" if rp else "NO")
 
-    st.write("τ̇ field")
     st.dataframe(pd.DataFrame(tau))
-
-    st.write("Hot cells")
     st.dataframe(pd.DataFrame(hot.astype(int)))
 
-    if st.session_state.sq_play and st.session_state.sq_step < len(times) - 1:
-        time.sleep(play_speed_ms / 1000.0)
-        st.session_state.sq_step += 1
+    if st.session_state.square_play and st.session_state.square_step < len(times)-1:
+        time.sleep(speed/1000)
+        st.session_state.square_step += 1
         st.rerun()
-
-    st.stop()
-
-# =====================================================
-# SCALAR OUTPUT
-# =====================================================
-
-st.divider()
-st.subheader("Scalar Output")
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Z", f"{Z:.3f}")
-c2.metric("Σ", f"{Sigma:.3f}")
-c3.metric("τ̇", f"{tau_rate:.4f}")
-c4.metric("RP", f"{rp_prob:.1%}")
-c5.metric("Confidence", f"{conf:.1%}")
-
-if rp_prob > 0.75:
-    st.error("🚨 TRANSITION")
-elif rp_prob > 0.4:
-    st.warning("⚠️ RP Watch")
-else:
-    st.success("✅ Stable")
-
-st.subheader("Evolution")
-chart_df = pd.DataFrame({
-    "τ̇": tau_history + [tau_rate],
-    "Θᴿᴾ": [theta_rp] * (len(tau_history) + 1)
-})
-st.line_chart(chart_df)
