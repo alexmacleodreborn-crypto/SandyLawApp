@@ -4,6 +4,7 @@ import pandas as pd
 import math
 import requests
 from io import StringIO
+import time
 
 # =====================================================
 # SESSION STATE (Play / Pause)
@@ -218,7 +219,7 @@ if (
 ):
     # small delay so Play is readable
     if play_speed_ms is not None:
-        st.sleep(play_speed_ms / 1000.0)
+       time.sleep(play_speed_ms / 1000.0)
     st.session_state.step += 1
     st.experimental_rerun()
 
