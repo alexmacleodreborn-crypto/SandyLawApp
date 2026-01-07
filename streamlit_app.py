@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
+import requests
 from io import StringIO
 
 # =====================================================
@@ -37,6 +38,17 @@ def sandy_core(confinement, entropy, tau_history, theta_rp):
     return Z, Sigma, tau_rate, rp_prob, confidence
 
 # =====================================================
+# USGS HANS Volcano API (Context Layer)
+# =====================================================
+
+@st.cache_data(ttl=3600)
+def fetch_usgs_volcanoes():
+    url = "https://volcanoes.usgs.gov/hans-public/api/volcano/"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+# =====================================================
 # Streamlit UI
 # =====================================================
 
@@ -44,11 +56,55 @@ st.set_page_config(page_title="SandyOS", layout="wide")
 st.title("🧭 SandyOS — Effective Time & Reaction Point Monitor")
 st.caption("dτₛₗ/dt = (1 − Z) Σ")
 
-# Sidebar
+# =====================================================
+# SIDEBAR CONTROLS
+# =====================================================
+
 st.sidebar.header("⚙️ Controls")
-theta_rp = st.sidebar.slider("RP Threshold (Θᴿᴾ)", 0.0, 1.0, 0.05, 0.01)
+theta_rp_user = st.sidebar.slider("RP Threshold (Θᴿᴾ)", 0.0, 1.0, 0.05, 0.01)
 history_len = st.sidebar.slider("History Length", 3, 50, 10)
 mode = st.sidebar.radio("Input Mode", ["Manual", "Paste CSV"])
+
+# -----------------------------------------------------
+# Volcano Context (USGS HANS)
+# -----------------------------------------------------
+
+st.sidebar.divider()
+st.sidebar.subheader("🌋 Volcano Context (USGS HANS)")
+
+theta_rp = theta_rp_user
+volcano = None
+selected_volcano = None
+
+try:
+    volcanoes = fetch_usgs_volcanoes()
+    volcano_lookup = {
+        v.get("volcanoName"): v
+        for v in volcanoes
+        if v.get("volcanoName")
+    }
+
+    selected_volcano = st.sidebar.selectbox(
+        "Select volcano",
+        sorted(volcano_lookup.keys())
+    )
+
+    volcano = volcano_lookup[selected_volcano]
+
+    st.sidebar.markdown("**Volcano details**")
+    st.sidebar.write(f"Type: {volcano.get('volcanoType', 'n/a')}")
+    st.sidebar.write(f"Region: {volcano.get('region', 'n/a')}")
+    st.sidebar.write(f"Elevation: {volcano.get('elevation', 'n/a')} m")
+
+    # Optional RP threshold tuning by volcano type
+    vtype = (volcano.get("volcanoType") or "").lower()
+    if "shield" in vtype:
+        theta_rp = min(theta_rp, 0.04)
+    elif "strato" in vtype:
+        theta_rp = max(theta_rp, 0.06)
+
+except Exception:
+    st.sidebar.warning("USGS volcano list unavailable")
 
 # =====================================================
 # INPUT HANDLING
@@ -90,7 +146,6 @@ else:
 
     df = pd.read_csv(StringIO(csv_text))
 
-    # Validation
     conf_cols = df.filter(like="confinement")
     ent_cols = df.filter(like="entropy")
 
@@ -98,11 +153,9 @@ else:
         st.error("CSV must contain confinement_* and entropy_* columns")
         st.stop()
 
-    # Current state = last row
     confinement = conf_cols.iloc[-1].tolist()
     entropy = ent_cols.iloc[-1].tolist()
 
-    # Build τ history from earlier rows
     tau_history = []
     for i in range(max(0, len(df) - history_len), len(df) - 1):
         z_i = normalize(conf_cols.iloc[i].tolist())
@@ -123,6 +176,13 @@ Z, Sigma, tau_rate, rp_prob, confidence = sandy_core(
 
 st.divider()
 st.subheader("📊 SandyOS Output")
+
+if selected_volcano:
+    st.caption(
+        f"Context: {selected_volcano} "
+        f"({volcano.get('volcanoType', 'unknown type')}, "
+        f"{volcano.get('region', 'unknown region')})"
+    )
 
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Z (Trap Strength)", f"{Z:.3f}")
@@ -158,5 +218,6 @@ with st.expander("🧠 Explainability"):
     • **Z** — how trapped the system is  
     • **Σ** — how much disorder escapes  
     • **dτₛₗ/dt** — how fast change is allowed  
-    • **RP probability** — warning before event
+    • **RP probability** — warning before event  
+    • Volcano data provided by **USGS HANS API**
     """)
